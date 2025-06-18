@@ -1,4 +1,6 @@
-![image](https://github.com/user-attachments/assets/6e1b9359-0fc8-473a-90d2-7e0c33de7422)
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/6e1b9359-0fc8-473a-90d2-7e0c33de7422" alt="YeldFi Logo" width="200"/>
+</p>
 
 # YeldFi - Minimalist Yield Aggregator
 
