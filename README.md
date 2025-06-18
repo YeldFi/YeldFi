@@ -30,6 +30,10 @@ The protocol consists of three main components:
 | **MEDIUM** 🟡| 50%            | 50%                 | Balanced approach |
 | **HIGH** 🔴  | 20%            | 80%                 | Aggressive approach |
 
+## 💰 Auto-Compound System
+
+YeldFi features an advanced **auto-compound mechanism** that automatically reinvests protocol rewards to maximize yield efficiency.
+
 ## 🎯 Protocol Flow
 
 ### Deposit Flow:
@@ -45,10 +49,5 @@ The protocol consists of three main components:
 ### Withdraw Flow:
 1. User sends shares to Vault for redemption
 2. Vault returns equivalent amount of assets to user
-
-
-## ⚠️ Disclaimer
-
-Use at your own risk. Always DYOR (Do Your Own Research) before investing in DeFi protocols.
 
 ---
