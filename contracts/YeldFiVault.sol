@@ -303,4 +303,82 @@ contract YeldFiVault is IERC4626 {
     function emergencyWithdraw() external onlyOwner {
         strategy.emergencyWithdraw();
     }
+    
+    // Auto-compound functions
+    /**
+     * @dev Trigger auto-compound manually
+     * @notice Anyone can call this to compound rewards for all users
+     * @return compoundedAmount Amount of rewards that were compounded
+     */
+    function autoCompound() external returns (uint256 compoundedAmount) {
+        uint256 assetsBefore = totalAssets();
+        compoundedAmount = strategy.autoCompound();
+        uint256 assetsAfter = totalAssets();
+        
+        // If auto-compound generated profit, take performance fee
+        if (assetsAfter > assetsBefore && compoundedAmount > 0) {
+            uint256 profit = assetsAfter - assetsBefore;
+            uint256 fee = (profit * performanceFee) / FEE_PRECISION;
+            
+            if (fee > 0) {
+                // Mint shares to owner as performance fee
+                uint256 feeShares = convertToShares(fee);
+                _mint(owner, feeShares);
+                emit Harvest(profit, fee);
+            }
+        }
+        
+        return compoundedAmount;
+    }
+    
+    /**
+     * @dev Claim rewards without auto-compounding
+     * @notice Only owner can claim rewards manually
+     * @return totalRewards Amount of rewards claimed
+     */
+    function claimRewards() external onlyOwner returns (uint256 totalRewards) {
+        return strategy.claimRewards();
+    }
+    
+    /**
+     * @dev Get pending rewards from all protocols
+     * @return aaveRewards Pending rewards from Aave
+     * @return compoundRewards Pending rewards from Compound
+     */
+    function getPendingRewards() external view returns (uint256 aaveRewards, uint256 compoundRewards) {
+        return strategy.getPendingRewards();
+    }
+    
+    /**
+     * @dev Configure auto-compound settings (only owner)
+     * @param _minCompoundAmount Minimum reward amount to trigger auto-compound
+     * @param _enabled Whether auto-compound is enabled
+     */
+    function setAutoCompoundConfig(uint256 _minCompoundAmount, bool _enabled) external onlyOwner {
+        strategy.setAutoCompoundConfig(_minCompoundAmount, _enabled);
+    }
+    
+    /**
+     * @dev Set performance fee for auto-compound (only owner)
+     * @param _performanceFee Performance fee in basis points (max 500 = 5%)
+     */
+    function setPerformanceFeeCompound(uint256 _performanceFee) external onlyOwner {
+        strategy.setPerformanceFeeCompound(_performanceFee);
+    }
+    
+    /**
+     * @dev Get auto-compound statistics
+     * @return totalCompounded Total amount compounded so far
+     * @return lastCompoundTime Last time auto-compound was executed
+     * @return isEnabled Whether auto-compound is enabled
+     * @return minAmount Minimum amount to trigger auto-compound
+     */
+    function getAutoCompoundStats() external view returns (
+        uint256 totalCompounded,
+        uint256 lastCompoundTime,
+        bool isEnabled,
+        uint256 minAmount
+    ) {
+        return strategy.getAutoCompoundStats();
+    }
 } 
