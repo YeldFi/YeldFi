@@ -7,7 +7,7 @@ import "./interfaces/IProtocol.sol";
 
 /**
  * @title YeldFiStrategy
- * @dev Strategy contract that manages allocation between Aave and Compound
+ * @dev Strategy contract that manages allocation between Aave and Compound with auto-compound functionality
  */
 contract YeldFiStrategy is IYeldFiStrategy {
     IERC20 public immutable asset;
@@ -24,6 +24,19 @@ contract YeldFiStrategy is IYeldFiStrategy {
     uint256 public lastRebalanceTimestamp;
     uint256 public constant REBALANCE_COOLDOWN = 6 hours;
     
+    // Auto-compound configuration
+    uint256 public minCompoundAmount = 10e18; // Minimum amount to trigger auto-compound
+    uint256 public lastCompoundTimestamp;
+    uint256 public constant COMPOUND_COOLDOWN = 1 hours; // Minimum time between compounds
+    uint256 public totalCompoundedRewards;
+    bool public autoCompoundEnabled = true;
+    
+    // Rewards tracking
+    mapping(address => uint256) public lastRewardsClaim;
+    uint256 public totalRewardsClaimed;
+    uint256 public performanceFeeCompound = 50; // 0.5% performance fee on auto-compound (5000 = 50%)
+    uint256 public constant FEE_PRECISION = 10000;
+    
     // Risk profile allocations (basis points - 10000 = 100%)
     mapping(RiskProfile => uint256) public aaveAllocation;
     mapping(RiskProfile => uint256) public compoundAllocation;
@@ -31,6 +44,11 @@ contract YeldFiStrategy is IYeldFiStrategy {
     // Slippage protection (basis points)
     uint256 public constant MAX_SLIPPAGE = 100; // 1%
     uint256 public constant SLIPPAGE_PRECISION = 10000;
+    
+    // Events for auto-compound
+    event AutoCompound(uint256 rewardsAmount, uint256 compoundedAmount, uint256 feeAmount, uint256 timestamp);
+    event AutoCompoundConfigChanged(uint256 minAmount, bool enabled, uint256 timestamp);
+    event RewardsClaimed(address indexed protocol, uint256 amount, uint256 timestamp);
     
     modifier onlyVault() {
         require(msg.sender == vault, "Not vault");
@@ -130,6 +148,11 @@ contract YeldFiStrategy is IYeldFiStrategy {
             block.timestamp >= lastRebalanceTimestamp + REBALANCE_COOLDOWN,
             "Rebalance cooldown active"
         );
+        
+        // Auto-compound before rebalancing if enabled
+        if (autoCompoundEnabled) {
+            autoCompound();
+        }
         
         uint256 totalAssets_ = totalAssets();
         if (totalAssets_ == 0) return;
@@ -304,5 +327,235 @@ contract YeldFiStrategy is IYeldFiStrategy {
         require(_aaveAllocation + _compoundAllocation == 10000, "Invalid allocations");
         aaveAllocation[profile] = _aaveAllocation;
         compoundAllocation[profile] = _compoundAllocation;
+    }
+    
+    /**
+     * @dev Auto-compound accumulated rewards from protocols
+     * @notice Can be called by anyone (keeper job) or automatically during rebalance
+     * @return compoundedAmount Amount of rewards that were compounded
+     */
+    function autoCompound() public returns (uint256 compoundedAmount) {
+        require(autoCompoundEnabled, "Auto-compound disabled");
+        require(
+            block.timestamp >= lastCompoundTimestamp + COMPOUND_COOLDOWN,
+            "Compound cooldown active"
+        );
+        
+        // Claim rewards from both protocols
+        uint256 totalRewards = _claimAllRewards();
+        
+        if (totalRewards < minCompoundAmount) {
+            return 0;
+        }
+        
+        // Calculate performance fee
+        uint256 feeAmount = 0;
+        if (performanceFeeCompound > 0) {
+            feeAmount = (totalRewards * performanceFeeCompound) / FEE_PRECISION;
+            // Send fee to vault (vault owner can collect fees)
+            if (feeAmount > 0) {
+                asset.transfer(vault, feeAmount);
+            }
+        }
+        
+        // Compound the remaining rewards
+        compoundedAmount = totalRewards - feeAmount;
+        
+        if (compoundedAmount > 0) {
+            // Deposit according to current risk allocation
+            uint256 aaveAmount = (compoundedAmount * aaveAllocation[riskProfile]) / 10000;
+            uint256 compoundAmount = compoundedAmount - aaveAmount;
+            
+            if (aaveAmount > 0) {
+                _depositToAave(aaveAmount);
+            }
+            
+            if (compoundAmount > 0) {
+                _depositToCompound(compoundAmount);
+            }
+            
+            // Update tracking
+            totalCompoundedRewards += compoundedAmount;
+            lastCompoundTimestamp = block.timestamp;
+            
+            emit AutoCompound(totalRewards, compoundedAmount, feeAmount);
+        }
+        
+        return compoundedAmount;
+    }
+    
+    /**
+     * @dev Claim rewards from all protocols
+     * @return totalRewards Total amount of rewards claimed
+     */
+    function claimRewards() external returns (uint256 totalRewards) {
+        totalRewards = _claimAllRewards();
+        if (totalRewards > 0) {
+            // Transfer rewards to vault for manual handling
+            asset.transfer(vault, totalRewards);
+        }
+        return totalRewards;
+    }
+    
+    /**
+     * @dev Get pending rewards from all protocols
+     * @return aaveRewards Pending rewards from Aave
+     * @return compoundRewards Pending rewards from Compound
+     */
+    function getPendingRewards() external view returns (uint256 aaveRewards, uint256 compoundRewards) {
+        aaveRewards = _getAavePendingRewards();
+        compoundRewards = _getCompoundPendingRewards();
+    }
+    
+    /**
+     * @dev Set auto-compound configuration (only owner)
+     * @param _minCompoundAmount Minimum reward amount to trigger auto-compound
+     * @param _enabled Whether auto-compound is enabled
+     */
+    function setAutoCompoundConfig(uint256 _minCompoundAmount, bool _enabled) external onlyOwner {
+        minCompoundAmount = _minCompoundAmount;
+        autoCompoundEnabled = _enabled;
+        emit AutoCompoundConfigChanged(_minCompoundAmount, _enabled);
+    }
+    
+    /**
+     * @dev Set performance fee for auto-compound (only owner)
+     * @param _performanceFee Performance fee in basis points (max 500 = 5%)
+     */
+    function setPerformanceFeeCompound(uint256 _performanceFee) external onlyOwner {
+        require(_performanceFee <= 500, "Fee too high"); // Max 5%
+        performanceFeeCompound = _performanceFee;
+    }
+    
+    /**
+     * @dev Internal function to claim rewards from all protocols
+     * @return totalRewards Total rewards claimed
+     */
+    function _claimAllRewards() internal returns (uint256 totalRewards) {
+        uint256 aaveRewards = _claimAaveRewards();
+        uint256 compoundRewards = _claimCompoundRewards();
+        
+        totalRewards = aaveRewards + compoundRewards;
+        totalRewardsClaimed += totalRewards;
+        
+        return totalRewards;
+    }
+    
+    /**
+     * @dev Claim rewards from Aave protocol
+     * @return rewardsAmount Amount of rewards claimed
+     */
+    function _claimAaveRewards() internal returns (uint256 rewardsAmount) {
+        try aaveToken.getRewards() returns (uint256 rewards) {
+            if (rewards > 0) {
+                emit RewardsClaimed(address(aaveLendingPool), rewards);
+                return rewards;
+            }
+        } catch {
+            // Some Aave versions may not have direct reward claiming
+            // In that case, rewards are automatically compounded
+        }
+        return 0;
+    }
+    
+    /**
+     * @dev Claim rewards from Compound protocol
+     * @return rewardsAmount Amount of rewards claimed
+     */
+    function _claimCompoundRewards() internal returns (uint256 rewardsAmount) {
+        try compoundToken.claimComp(address(this)) returns (uint256 rewards) {
+            if (rewards > 0) {
+                emit RewardsClaimed(address(compoundToken), rewards);
+                return rewards;
+            }
+        } catch {
+            // Handle case where COMP rewards are not available
+        }
+        return 0;
+    }
+    
+    /**
+     * @dev Get pending Aave rewards
+     * @return pendingRewards Amount of pending rewards
+     */
+    function _getAavePendingRewards() internal view returns (uint256 pendingRewards) {
+        try aaveToken.getUnclaimedRewards(address(this)) returns (uint256 rewards) {
+            return rewards;
+        } catch {
+            return 0;
+        }
+    }
+    
+    /**
+     * @dev Get pending Compound rewards
+     * @return pendingRewards Amount of pending rewards
+     */
+    function _getCompoundPendingRewards() internal view returns (uint256 pendingRewards) {
+        try compoundToken.getCompAccrued(address(this)) returns (uint256 rewards) {
+            return rewards;
+        } catch {
+            return 0;
+        }
+    }
+    
+    /**
+     * @dev Get auto-compound statistics
+     * @return totalCompounded Total amount compounded so far
+     * @return lastCompoundTime Last time auto-compound was executed
+     * @return isEnabled Whether auto-compound is enabled
+     * @return minAmount Minimum amount to trigger auto-compound
+     */
+    function getAutoCompoundStats() external view returns (
+        uint256 totalCompounded,
+        uint256 lastCompoundTime,
+        bool isEnabled,
+        uint256 minAmount
+    ) {
+        return (
+            totalCompoundedRewards,
+            lastCompoundTimestamp,
+            autoCompoundEnabled,
+            minCompoundAmount
+        );
+    }
+    
+    /**
+     * @dev Get total rewards claimed so far
+     * @return totalClaimed Total amount of rewards claimed
+     */
+    function getTotalRewardsClaimed() external view returns (uint256 totalClaimed) {
+        return totalRewardsClaimed;
+    }
+    
+    /**
+     * @dev Check if auto-compound can be executed
+     * @return canExecute Whether auto-compound can be executed now
+     * @return pendingAmount Amount of pending rewards
+     * @return timeLeft Time left until cooldown expires (0 if ready)
+     */
+    function canAutoCompound() external view returns (
+        bool canExecute,
+        uint256 pendingAmount,
+        uint256 timeLeft
+    ) {
+        if (!autoCompoundEnabled) {
+            return (false, 0, 0);
+        }
+        
+        // Check cooldown
+        uint256 nextCompoundTime = lastCompoundTimestamp + COMPOUND_COOLDOWN;
+        if (block.timestamp < nextCompoundTime) {
+            return (false, 0, nextCompoundTime - block.timestamp);
+        }
+        
+        // Check pending rewards
+        (uint256 aaveRewards, uint256 compoundRewards) = (
+            _getAavePendingRewards(),
+            _getCompoundPendingRewards()
+        );
+        pendingAmount = aaveRewards + compoundRewards;
+        
+        canExecute = pendingAmount >= minCompoundAmount;
+        return (canExecute, pendingAmount, 0);
     }
 } 
