@@ -1,3 +1,5 @@
+![image](https://github.com/user-attachments/assets/6e1b9359-0fc8-473a-90d2-7e0c33de7422)
+
 # YeldFi - Minimalist Yield Aggregator
 
 🚀 **YeldFi** is a minimalist yield aggregator with dynamic risk adjustment written in Solidity. The protocol automatically distributes user deposits between multiple DeFi protocols (Aave and Compound) and periodically rebalances positions according to a specified risk profile.
